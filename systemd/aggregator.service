@@ -1,0 +1,21 @@
+[Unit]
+Description=tg-reddit-aggregator (Telegram + Reddit news aggregator with Claude dedup)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace these two with your actual user/path.
+User=youruser
+WorkingDirectory=/home/youruser/tg-reddit-aggregator
+ExecStartPre=/home/youruser/tg-reddit-aggregator/start.sh doctor
+ExecStart=/home/youruser/tg-reddit-aggregator/start.sh
+Restart=on-failure
+RestartSec=10
+# Sane defaults; tune as needed.
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

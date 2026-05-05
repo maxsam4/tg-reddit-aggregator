@@ -1,0 +1,30 @@
+# Where deduped, filtered output is delivered. The userbot account must be a member of this group.
+# Use the @username for public groups or a numeric chat_id (negative for supergroups, e.g. -1001234567890).
+destination:
+  telegram_group: "@my_news_dump"
+
+telegram:
+  # The userbot account must be subscribed/joined to each channel below.
+  # Use the @username for public channels or a numeric channel_id for private ones.
+  channels:
+    - "@somecryptochannel"
+    # - -1001234567890
+
+reddit:
+  poll_interval_seconds: 60     # how often to poll new posts (default: every 60s)
+  posts_per_poll: 25            # how many newest posts to fetch per subreddit per cycle
+  subreddits:
+    - cryptocurrency
+    - ethereum
+
+dedup:
+  window_hours: 24              # Claude sees the last N hours of *delivered* items as context
+  max_chars_per_item: 1000      # truncate item text before storing/sending to Claude
+  model: "claude-haiku-4-5"     # any Claude model; haiku is the cheap default
+
+storage:
+  sqlite_path: "./data/state.db"
+
+logging:
+  level: INFO                   # DEBUG | INFO | WARNING | ERROR
+  file: "./data/aggregator.log" # set to null to log only to stderr
