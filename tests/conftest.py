@@ -130,12 +130,17 @@ class FakeAnthropicClient:
 
 @dataclass
 class FakeTelethonClient:
-    """Tracks forward_messages and send_message calls; supports raising on demand."""
+    """Tracks forward_messages, send_message, send_file, get_messages calls;
+    supports raising on demand and serving programmed messages from get_messages."""
 
     forwarded: list[dict[str, Any]] = field(default_factory=list)
     sent_messages: list[dict[str, Any]] = field(default_factory=list)
+    sent_files: list[dict[str, Any]] = field(default_factory=list)
     forward_should_raise: Exception | None = None
     send_should_raise: Exception | None = None
+    send_file_should_raise: Exception | None = None
+    # Programmable: maps (chat_id, message_id) -> message object that get_messages returns.
+    messages_by_id: dict[tuple[Any, int], Any] = field(default_factory=dict)
 
     async def forward_messages(self, entity: Any, messages: Any, from_peer: Any) -> Any:
         if self.forward_should_raise is not None:
@@ -158,7 +163,24 @@ class FakeTelethonClient:
         return None
 
     async def send_file(self, entity: Any, file: Any, **kwargs: Any) -> Any:
+        if self.send_file_should_raise is not None:
+            exc = self.send_file_should_raise
+            self.send_file_should_raise = None
+            raise exc
+        self.sent_files.append({"entity": entity, "file": file, "kwargs": kwargs})
         return None
+
+    async def get_messages(self, entity: Any, ids: Any) -> Any:
+        """Return programmed messages for the given (entity, id) keys.
+
+        Returns a list when `ids` is a list, a single message (or None) when scalar.
+        """
+        if isinstance(ids, list):
+            return [self.messages_by_id.get((entity, i)) for i in ids]
+        return self.messages_by_id.get((entity, ids))
+
+    def register_message(self, chat_id: Any, message: Any) -> None:
+        self.messages_by_id[(chat_id, message.id)] = message
 
     async def get_entity(self, identifier: Any) -> Any:
         return _FakeChat(id=identifier, title=f"Title-{identifier}")

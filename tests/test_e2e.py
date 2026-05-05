@@ -472,11 +472,15 @@ async def test_e2e_forward_restricted_falls_back_to_copy(
     store: Store, tmp_path: Path, fake_anthropic: FakeAnthropicClient,
     fake_telethon: FakeTelethonClient,
 ) -> None:
-    """Source channel has noforwards=True: the sender copy-fallbacks instead of failing."""
+    """Source channel has noforwards=True: the sender re-fetches the original
+    message and copies its full text (not the truncated dedup snippet) with attribution."""
 
     class ChatForwardsRestrictedError(Exception):
         pass
 
+    # Register the original message so get_messages() returns its full body.
+    original = _telegram_message(chat_id=-100, message_id=1, text="protected news with full body")
+    fake_telethon.register_message(-100, original)
     fake_telethon.forward_should_raise = ChatForwardsRestrictedError("nope")
 
     senders = {Source.TELEGRAM: TelegramSender(fake_telethon, destination="@dest")}
@@ -485,10 +489,7 @@ async def test_e2e_forward_restricted_falls_back_to_copy(
         anthropic=fake_anthropic, senders=senders,
     )
     fake_anthropic.queue(Decision.DELIVER, "ok")
-    cand = candidate_from_message(
-        _telegram_message(chat_id=-100, message_id=1, text="protected news"),
-        channel_title="LockedChannel",
-    )
+    cand = candidate_from_message(original, channel_title="LockedChannel")
     await d.enqueue(cand)
     await _drive_dispatcher_until_idle(d, store)
 
@@ -496,10 +497,94 @@ async def test_e2e_forward_restricted_falls_back_to_copy(
     assert fake_telethon.forwarded == []
     assert len(fake_telethon.sent_messages) == 1
     assert "📎 from LockedChannel" in fake_telethon.sent_messages[0]["message"]
-    assert "protected news" in fake_telethon.sent_messages[0]["message"]
+    assert "protected news with full body" in fake_telethon.sent_messages[0]["message"]
     # Item was marked delivered.
     history = await store.recent_history(window_hours=24)
     assert len(history) == 1
+
+
+@pytest.mark.asyncio
+async def test_e2e_decided_inflight_recovered_after_crash(
+    store: Store, tmp_path: Path, fake_anthropic: FakeAnthropicClient,
+    fake_telethon: FakeTelethonClient,
+) -> None:
+    """An item that reached `decided` (Claude responded) but never got delivered
+    (process crashed before mark_delivered) is recovered on restart and delivered
+    without re-asking Claude."""
+    from aggregator.models import Decision as _D
+    from aggregator.models import Status as _S
+
+    # Step 1: insert an item, mark_decided on it directly to simulate the
+    # mid-flight crash state.
+    cand = candidate_from_message(
+        _telegram_message(chat_id=-100, message_id=1, text="orphaned"),
+        channel_title="C",
+    )
+    item_id = await store.enqueue(cand, max_chars=1000)
+    await store.mark_decided(item_id, _D.DELIVER, "novel")
+    saved = await store.get_item(item_id)
+    assert saved.status == _S.DECIDED
+    assert saved.decision == _D.DELIVER
+
+    # Step 2: a fresh dispatcher comes up and processes the orphan.
+    senders = {Source.TELEGRAM: TelegramSender(fake_telethon, destination="@dest")}
+    d = _make_dispatcher(
+        store=store, filters_path=tmp_path / "f.md",
+        anthropic=fake_anthropic, senders=senders,
+    )
+    await _drive_dispatcher_until_idle(d, store)
+
+    # Anthropic was NOT consulted (already decided).
+    assert len(fake_anthropic.calls) == 0
+    # Item was forwarded.
+    assert len(fake_telethon.forwarded) == 1
+    saved = await store.get_item(item_id)
+    assert saved.status == _S.DELIVERED
+
+
+@pytest.mark.asyncio
+async def test_e2e_prune_does_not_violate_foreign_key(
+    store: Store, tmp_path: Path, fake_anthropic: FakeAnthropicClient,
+    fake_telethon: FakeTelethonClient,
+) -> None:
+    """Pruning items that have decisions rows must not raise FK constraint errors;
+    audit rows cascade-delete with their parent item."""
+    fake_anthropic.queue(Decision.DELIVER, "ok")
+    senders = {Source.TELEGRAM: TelegramSender(fake_telethon, destination="@dest")}
+    d = _make_dispatcher(
+        store=store, filters_path=tmp_path / "f.md",
+        anthropic=fake_anthropic, senders=senders,
+    )
+    cand = candidate_from_message(
+        _telegram_message(chat_id=-100, message_id=1, text="news"),
+        channel_title="C",
+    )
+    await d.enqueue(cand)
+    await _drive_dispatcher_until_idle(d, store)
+
+    # Confirm a decisions row exists referencing this item.
+    cur = await store.db.execute("SELECT COUNT(*) AS n FROM decisions")
+    row = await cur.fetchone()
+    assert row["n"] == 1
+
+    # Backdate delivered_at past the prune window so this item is eligible.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    very_old = (_dt.now(_UTC) - _td(days=10)).isoformat()
+    await store.db.execute(
+        "UPDATE items SET delivered_at = ? WHERE id = (SELECT id FROM items LIMIT 1)",
+        (very_old,),
+    )
+    await store.db.commit()
+
+    # Prune must not raise.
+    deleted = await store.prune(window_hours=24)
+    assert deleted["items_delivered"] == 1
+    # The decisions row should have been cascade-deleted.
+    cur = await store.db.execute("SELECT COUNT(*) AS n FROM decisions")
+    row = await cur.fetchone()
+    assert row["n"] == 0
 
 
 @pytest.mark.asyncio

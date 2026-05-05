@@ -104,26 +104,157 @@ async def test_sender_native_forward(fake_telethon: FakeTelethonClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sender_falls_back_to_copy_on_restriction(
+async def test_sender_falls_back_to_copy_uses_full_original_text(
     fake_telethon: FakeTelethonClient,
 ) -> None:
-    # Build a fake exception class whose name contains "ChatForwardsRestricted".
+    """Copy fallback re-fetches originals and uses their FULL text — not the
+    truncated dedup text on the StoredItem."""
+
     class ChatForwardsRestrictedError(Exception):
         pass
+
+    # Original message has a long body that exceeds dedup truncation.
+    full_body = "FULL ORIGINAL " + ("xxxx " * 500)
+    original = _msg(message_id=42, text=full_body)
+    fake_telethon.register_message(-1001, original)
 
     fake_telethon.forward_should_raise = ChatForwardsRestrictedError("nope")
     sender = TelegramSender(fake_telethon, destination="@dest")
     item = _stored_tg_item(
         {"chat_id": -1001, "message_ids": [42], "channel_title": "ChannelA"}
     )
-    item.text = "important news"
+    item.text = "TRUNCATED dedup snippet"  # what was stored at enqueue time
+
+    ok = await sender.deliver(item)
+    assert ok is True
+    # Text-only original (no media) → routes to send_message, not send_file.
+    assert len(fake_telethon.sent_messages) == 1
+    sent = fake_telethon.sent_messages[0]["message"]
+    assert "📎 from ChannelA" in sent
+    assert "FULL ORIGINAL" in sent  # full body preserved
+    assert "TRUNCATED" not in sent  # truncated dedup text NOT used
+
+
+@pytest.mark.asyncio
+async def test_sender_falls_back_to_copy_with_media(
+    fake_telethon: FakeTelethonClient,
+) -> None:
+    """Copy fallback for a message with media routes through send_file with caption."""
+
+    class ChatForwardsRestrictedError(Exception):
+        pass
+
+    original = _msg(message_id=42, text="caption text", has_media=True)
+    fake_telethon.register_message(-1001, original)
+
+    fake_telethon.forward_should_raise = ChatForwardsRestrictedError("nope")
+    sender = TelegramSender(fake_telethon, destination="@dest")
+    item = _stored_tg_item(
+        {"chat_id": -1001, "message_ids": [42], "channel_title": "ChannelA"}
+    )
+    ok = await sender.deliver(item)
+    assert ok is True
+    assert len(fake_telethon.sent_files) == 1
+    sent = fake_telethon.sent_files[0]
+    assert sent["entity"] == "@dest"
+    # Caption carries attribution + the original text.
+    assert "📎 from ChannelA" in sent["kwargs"]["caption"]
+    assert "caption text" in sent["kwargs"]["caption"]
+
+
+@pytest.mark.asyncio
+async def test_sender_copy_fallback_degrades_to_text_when_media_too_large(
+    fake_telethon: FakeTelethonClient,
+) -> None:
+    """If send_file fails (e.g. media size limit), we send text-only with a
+    `(media omitted)` note so the user still gets attribution + body."""
+
+    class ChatForwardsRestrictedError(Exception):
+        pass
+
+    class FileTooBigError(Exception):
+        pass
+
+    original = _msg(message_id=42, text="body text", has_media=True)
+    fake_telethon.register_message(-1001, original)
+
+    fake_telethon.forward_should_raise = ChatForwardsRestrictedError("nope")
+    fake_telethon.send_file_should_raise = FileTooBigError("oversized")
+    sender = TelegramSender(fake_telethon, destination="@dest")
+    item = _stored_tg_item(
+        {"chat_id": -1001, "message_ids": [42], "channel_title": "ChannelA"}
+    )
+    ok = await sender.deliver(item)
+    assert ok is True
+    # Routed through send_message after send_file failed.
+    assert len(fake_telethon.sent_messages) == 1
+    sent = fake_telethon.sent_messages[0]["message"]
+    assert "📎 from ChannelA" in sent
+    assert "body text" in sent
+    assert "media omitted" in sent
+
+
+@pytest.mark.asyncio
+async def test_sender_copy_fallback_handles_missing_originals(
+    fake_telethon: FakeTelethonClient,
+) -> None:
+    """If get_messages returns None for every id (deleted, inaccessible),
+    we fall back to the truncated dedup text with attribution rather than crash."""
+
+    class ChatForwardsRestrictedError(Exception):
+        pass
+
+    # No register_message → get_messages returns None for everything.
+    fake_telethon.forward_should_raise = ChatForwardsRestrictedError("nope")
+    sender = TelegramSender(fake_telethon, destination="@dest")
+    item = _stored_tg_item(
+        {"chat_id": -1001, "message_ids": [42], "channel_title": "ChannelA"}
+    )
+    item.text = "best-available snippet"
     ok = await sender.deliver(item)
     assert ok is True
     assert len(fake_telethon.sent_messages) == 1
-    sent = fake_telethon.sent_messages[0]
-    assert sent["entity"] == "@dest"
-    assert "📎 from ChannelA" in sent["message"]
-    assert "important news" in sent["message"]
+    sent = fake_telethon.sent_messages[0]["message"]
+    assert "📎 from ChannelA" in sent
+    assert "best-available snippet" in sent
+
+
+@pytest.mark.asyncio
+async def test_sender_copy_fallback_album_re_attribution_only_first(
+    fake_telethon: FakeTelethonClient,
+) -> None:
+    """For an album, the attribution prefix only appears on the first item; the rest
+    re-send their own captions/media without redundant prefixes."""
+
+    class ChatForwardsRestrictedError(Exception):
+        pass
+
+    fake_telethon.register_message(
+        -1001, _msg(message_id=10, text="first caption", has_media=True)
+    )
+    fake_telethon.register_message(
+        -1001, _msg(message_id=11, text="", has_media=True)
+    )
+    fake_telethon.register_message(
+        -1001, _msg(message_id=12, text="", has_media=True)
+    )
+
+    fake_telethon.forward_should_raise = ChatForwardsRestrictedError("nope")
+    sender = TelegramSender(fake_telethon, destination="@dest")
+    item = _stored_tg_item(
+        {"chat_id": -1001, "message_ids": [10, 11, 12], "channel_title": "ChannelA"}
+    )
+    ok = await sender.deliver(item)
+    assert ok is True
+    assert len(fake_telethon.sent_files) == 3
+    # First file carries attribution and caption.
+    first = fake_telethon.sent_files[0]
+    assert "📎 from ChannelA" in first["kwargs"]["caption"]
+    assert "first caption" in first["kwargs"]["caption"]
+    # Subsequent files do NOT re-attribute.
+    for f in fake_telethon.sent_files[1:]:
+        cap = f["kwargs"].get("caption")
+        assert cap is None or "📎 from" not in cap
 
 
 @pytest.mark.asyncio

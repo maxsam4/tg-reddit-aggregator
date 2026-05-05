@@ -32,6 +32,7 @@ class TelethonClientLike(Protocol):
     ) -> Any: ...
     async def send_message(self, entity: Any, message: str, **kwargs: Any) -> Any: ...
     async def send_file(self, entity: Any, file: Any, **kwargs: Any) -> Any: ...
+    async def get_messages(self, entity: Any, ids: Any) -> Any: ...
 
 
 def normalize_telegram_text(message: Any) -> str:
@@ -142,17 +143,101 @@ class TelegramSender:
         chat_id: Any,
         message_ids: list[int],
     ) -> bool:
-        """Best-effort copy of a forward-restricted message: text + small media + attribution."""
-        prefix = f"📎 from {channel_title}\n\n"
-        body = item.text or ""
+        """Copy a forward-restricted message by re-fetching originals.
+
+        For each original message we try send_file (when it has media) or send_message
+        (text only), preserving the original full body — NOT the truncated dedup text.
+        Attribution is prepended to the first item only. Per-item failures (oversized
+        media, etc.) degrade to text-only with a "(media omitted)" note.
+        """
+        prefix = f"📎 from {channel_title}"
+
+        # Re-fetch the original messages so we have full text and media handles.
         try:
-            await self.client.send_message(self.destination, prefix + body)
+            fetched = await self.client.get_messages(chat_id, ids=message_ids)
+        except Exception as e:
             log.warning(
-                "Forwarded item %s as text-only copy (forward-restricted source)", item.id
+                "get_messages failed for item %s; degrading to truncated text: %s",
+                item.id, e,
             )
+            fetched = None
+
+        if fetched is None:
+            messages: list[Any] = []
+        elif isinstance(fetched, list):
+            messages = [m for m in fetched if m is not None]
+        else:
+            messages = [fetched]
+
+        if not messages:
+            # Last-ditch: no originals available, send the (truncated) dedup text.
+            text_body = item.text or "(message unavailable)"
+            try:
+                await self.client.send_message(self.destination, f"{prefix}\n\n{text_body}")
+                log.warning(
+                    "Item %s: copy fallback used truncated dedup text "
+                    "(originals could not be fetched)",
+                    item.id,
+                )
+                return True
+            except Exception as e:
+                log.exception("Telegram copy fallback failed for item %s: %s", item.id, e)
+                return False
+
+        # Send the first message with attribution prefix.
+        first = messages[0]
+        first_text = getattr(first, "message", "") or getattr(first, "text", "") or ""
+        first_caption = f"{prefix}\n\n{first_text}".strip() if first_text else prefix
+
+        if await self._send_one(first, caption=first_caption, item_id=item.id) is False:
+            return False
+
+        # Send the rest of the album (or extra messages) without re-attribution.
+        for m in messages[1:]:
+            m_text = getattr(m, "message", "") or getattr(m, "text", "") or ""
+            await self._send_one(m, caption=m_text or None, item_id=item.id)
+
+        log.warning(
+            "Item %s delivered via copy fallback (forward-restricted source)", item.id
+        )
+        return True
+
+    async def _send_one(
+        self, message: Any, *, caption: str | None, item_id: int
+    ) -> bool:
+        """Send one message via send_file (if it has media) or send_message.
+        Returns False only on a hard failure of the text-only fallback path."""
+        has_media = bool(getattr(message, "media", None))
+        if has_media:
+            try:
+                kwargs: dict[str, Any] = {}
+                if caption is not None:
+                    kwargs["caption"] = caption
+                await self.client.send_file(self.destination, message, **kwargs)
+                return True
+            except Exception as e:
+                log.warning(
+                    "Item %s: media re-upload failed (%s); degrading to text-only",
+                    item_id, e,
+                )
+                # Fall through to send_message with a (media omitted) note.
+                degraded = (caption or "").rstrip()
+                degraded = (degraded + "\n\n(media omitted — see source channel)").strip()
+                try:
+                    await self.client.send_message(self.destination, degraded)
+                    return True
+                except Exception as e2:
+                    log.exception("Item %s: degraded text send also failed: %s", item_id, e2)
+                    return False
+
+        # Text-only message
+        if not caption:
+            return True  # nothing to send
+        try:
+            await self.client.send_message(self.destination, caption)
             return True
         except Exception as e:
-            log.exception("Telegram copy fallback failed for item %s: %s", item.id, e)
+            log.exception("Item %s: text send failed: %s", item_id, e)
             return False
 
 
@@ -174,13 +259,25 @@ class TelegramListener:
         """Resolve channel entities and register event handlers."""
         # Local imports so this module can be imported without telethon at test-time.
         from telethon import events  # type: ignore[import-not-found]
+        from telethon.utils import get_peer_id  # type: ignore[import-not-found]
 
         resolved = []
         for ch in self.channels:
             entity = await self.client.get_entity(ch)
             resolved.append(entity)
-            title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(ch)
-            self._channel_titles[getattr(entity, "id", ch)] = title
+            title = (
+                getattr(entity, "title", None)
+                or getattr(entity, "username", None)
+                or str(ch)
+            )
+            # event.chat_id returns the *marked* peer id form (e.g. -100... for
+            # channels/supergroups), so we must key the title map by the same
+            # canonicalization to look it up reliably from the event handlers.
+            try:
+                key = get_peer_id(entity)
+            except Exception:
+                key = getattr(entity, "id", ch)
+            self._channel_titles[key] = title
 
         async def on_new_message(event: Any) -> None:
             try:

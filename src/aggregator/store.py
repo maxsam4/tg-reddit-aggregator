@@ -47,7 +47,7 @@ _SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS decisions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item_id INTEGER NOT NULL REFERENCES items(id),
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
         decision TEXT NOT NULL,
         reason TEXT,
         model TEXT,
@@ -160,7 +160,15 @@ class Store:
         return cur.lastrowid if cur.rowcount > 0 else None
 
     async def claim_pending(self, limit: int = 10) -> list[StoredItem]:
-        """Return up to N items that are queued, or in retry with next_attempt_at <= now.
+        """Return up to N items that need processing.
+
+        Includes:
+          - status='queued': fresh items needing a Claude decision.
+          - status='decided': decided but not yet terminally routed (e.g. crashed
+            after Claude responded but before delivery completed). The dispatcher
+            re-enters such items with item.decision already set and skips Claude.
+          - status='retry' with next_attempt_at <= now: items that hit a transient
+            error (Claude or delivery) and are due for another attempt.
 
         Returns oldest-observed-first to preserve fairness.
         """
@@ -169,11 +177,18 @@ class Store:
             """
             SELECT * FROM items
             WHERE status = ?
+               OR status = ?
                OR (status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
             ORDER BY observed_at ASC
             LIMIT ?
             """,
-            (Status.QUEUED.value, Status.RETRY.value, now_iso, limit),
+            (
+                Status.QUEUED.value,
+                Status.DECIDED.value,
+                Status.RETRY.value,
+                now_iso,
+                limit,
+            ),
         )
         rows = await cur.fetchall()
         return [_row_to_item(r) for r in rows]
