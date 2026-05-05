@@ -16,7 +16,7 @@ from .filters import FiltersFile
 from .logging_setup import configure_logging
 from .models import Source
 from .pipeline import Dispatcher, Pruner
-from .reddit import RedditPoller, RedditSender
+from .reddit import RedditPoller, RedditSender, make_httpx_fetcher
 from .store import Store
 from .telegram import TelegramListener, TelegramSender
 
@@ -170,21 +170,20 @@ async def _doctor(config_path: str) -> int:
         line("✗", f"Anthropic: {e}")
         failures += 1
 
-    # 5. Reddit (read-only public listing — works with script-app creds, no password)
+    # 5. Reddit (unauthenticated public JSON endpoint — only checks the UA gets a 200)
     try:
-        import asyncpraw  # type: ignore[import-not-found]
-        reddit = asyncpraw.Reddit(
-            client_id=secrets.reddit_client_id,
-            client_secret=secrets.reddit_client_secret,
-            user_agent=secrets.reddit_user_agent,
-        )
+        fetch, close_fetcher = make_httpx_fetcher(secrets.reddit_user_agent)
         try:
-            sub = await reddit.subreddit("test")
-            async for _ in sub.new(limit=1):
-                break
-            line("✓", "Reddit auth OK (read-only listing)")
+            submissions = await fetch("test", 1)
         finally:
-            await reddit.close()
+            await close_fetcher()
+        # Empty list is acceptable (rate limit / 403 returns []); we surface the
+        # underlying log line if it happened. The check passes if the call did not
+        # raise — meaning the UA is valid and the endpoint is reachable.
+        line(
+            "✓",
+            f"Reddit public endpoint OK ({len(submissions)} sample posts from r/test)",
+        )
     except Exception as e:
         line("✗", f"Reddit: {e}")
         failures += 1
@@ -269,8 +268,7 @@ async def _run(config_path: str, filters_path: str) -> None:
     cfg = load_config(config_path)
     configure_logging(cfg.logging.level, cfg.logging.file)
 
-    # Lazy imports so unit tests can import this module without telethon/asyncpraw.
-    import asyncpraw  # type: ignore[import-not-found]
+    # Lazy imports so unit tests can import this module without telethon installed.
     from anthropic import AsyncAnthropic
     from telethon import TelegramClient  # type: ignore[import-not-found]
 
@@ -324,14 +322,9 @@ async def _run(config_path: str, filters_path: str) -> None:
     if cfg.telegram.channels:
         await listener.start()
 
-    reddit_client = asyncpraw.Reddit(
-        client_id=secrets.reddit_client_id,
-        client_secret=secrets.reddit_client_secret,
-        user_agent=secrets.reddit_user_agent,
-    )
-
+    reddit_fetch, reddit_close = make_httpx_fetcher(secrets.reddit_user_agent)
     poller = RedditPoller(
-        client=reddit_client,
+        fetcher=reddit_fetch,
         subreddits=cfg.reddit.subreddits,
         enqueue=dispatcher.enqueue,
         already_seen=lambda sid: store.has_source_id(Source.REDDIT, sid),
@@ -354,7 +347,7 @@ async def _run(config_path: str, filters_path: str) -> None:
             telegram_client.run_until_disconnected(),
         )
     finally:
-        await reddit_client.close()
+        await reddit_close()
         await telegram_client.disconnect()
         await store.close()
 

@@ -3,7 +3,7 @@
 A self-hosted news aggregator that listens to Telegram channels and Reddit subreddits, deduplicates similar posts via the Claude API, and delivers a single curated stream to a Telegram group of your choice.
 
 - **Telegram side**: a userbot session listens to channels you're a member of and forwards posts (preserving the "Forwarded from X" header) to your destination group.
-- **Reddit side**: a poller fetches new submissions from the subreddits you list and posts them to the same destination group as standalone messages with a permalink.
+- **Reddit side**: a poller hits Reddit's public JSON endpoint (no auth, no script app) for the subreddits you list and posts them to the same destination group as standalone messages with a permalink.
 - **Dedup + filter**: every candidate post is judged by Claude against a rolling 24-hour history of already-delivered items, and against a free-form `filters.md` you maintain.
 - **Single process**: one Python `asyncio` daemon, durable SQLite work queue, supervised by [OpenClaw](https://openclaw.ai) or systemd.
 

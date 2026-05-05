@@ -320,7 +320,7 @@ async def test_e2e_reddit_poller_skips_already_seen_across_polls(
     fake_anthropic.queue(Decision.DELIVER, "ok")
 
     poller = RedditPoller(
-        client=fake_reddit,
+        fetcher=fake_reddit.fetch,
         subreddits=["test"],
         enqueue=d.enqueue,
         already_seen=lambda sid: store.has_source_id(Source.REDDIT, sid),

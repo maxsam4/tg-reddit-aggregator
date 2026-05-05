@@ -196,11 +196,14 @@ class _FakeChat:
     username: str | None = None
 
 
-# ---------- fake asyncpraw ----------
+# ---------- fake Reddit fetcher ----------
 
 
 @dataclass
 class FakeSubmission:
+    """Test-only submission shape; field names match aggregator.reddit.RedditSubmission
+    so candidate_from_submission accepts both transparently via duck typing."""
+
     id: str
     title: str
     is_self: bool = True
@@ -212,39 +215,17 @@ class FakeSubmission:
     subreddit_name: str = "test"
     author_name: str = "alice"
 
-    @property
-    def subreddit(self) -> Any:
-        return type("Sub", (), {"display_name": self.subreddit_name})()
-
-    @property
-    def author(self) -> Any:
-        return type("Auth", (), {"name": self.author_name})()
-
-
-class _FakeAsyncIter:
-    def __init__(self, items: list[FakeSubmission]) -> None:
-        self._items = list(items)
-
-    def __aiter__(self) -> _FakeAsyncIter:
-        return self
-
-    async def __anext__(self) -> FakeSubmission:
-        if not self._items:
-            raise StopAsyncIteration
-        return self._items.pop(0)
-
-
-class _FakeSubreddit:
-    def __init__(self, name: str, submissions: list[FakeSubmission]) -> None:
-        self.display_name = name
-        self._submissions = submissions
-
-    def new(self, limit: int = 25) -> _FakeAsyncIter:
-        return _FakeAsyncIter(self._submissions[:limit])
+    def __post_init__(self) -> None:
+        if not self.fullname:
+            self.fullname = f"t3_{self.id}"
 
 
 class FakeRedditClient:
-    """Programmable fake of asyncpraw.Reddit."""
+    """Programmable in-memory fetcher for tests.
+
+    Stores per-subreddit submission lists. Pass `client.fetch` as the `fetcher`
+    argument to RedditPoller.
+    """
 
     def __init__(self) -> None:
         self.subreddit_data: dict[str, list[FakeSubmission]] = {}
@@ -253,8 +234,8 @@ class FakeRedditClient:
     def add(self, sub_name: str, *submissions: FakeSubmission) -> None:
         self.subreddit_data.setdefault(sub_name, []).extend(submissions)
 
-    async def subreddit(self, name: str) -> _FakeSubreddit:
-        return _FakeSubreddit(name, list(self.subreddit_data.get(name, [])))
+    async def fetch(self, sub_name: str, limit: int) -> list[FakeSubmission]:
+        return list(self.subreddit_data.get(sub_name, []))[:limit]
 
     async def close(self) -> None:
         self.closed = True

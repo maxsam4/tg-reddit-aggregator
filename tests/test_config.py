@@ -54,8 +54,6 @@ def test_load_secrets_requires_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     for k in (
         "TELEGRAM_API_ID",
         "TELEGRAM_API_HASH",
-        "REDDIT_CLIENT_ID",
-        "REDDIT_CLIENT_SECRET",
         "REDDIT_USER_AGENT",
         "ANTHROPIC_API_KEY",
     ):
@@ -67,8 +65,6 @@ def test_load_secrets_requires_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 def test_load_secrets_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TELEGRAM_API_ID", "12345")
     monkeypatch.setenv("TELEGRAM_API_HASH", "abcdef")
-    monkeypatch.setenv("REDDIT_CLIENT_ID", "rcid")
-    monkeypatch.setenv("REDDIT_CLIENT_SECRET", "rcsec")
     monkeypatch.setenv("REDDIT_USER_AGENT", "ua")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     s = load_secrets(tmp_path / "no.env")
@@ -76,14 +72,23 @@ def test_load_secrets_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert s.reddit_user_agent == "ua"
 
 
+def test_load_secrets_uses_default_user_agent_when_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """REDDIT_USER_AGENT is no longer strictly required; we fall back to a default."""
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "abcdef")
+    monkeypatch.delenv("REDDIT_USER_AGENT", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    s = load_secrets(tmp_path / "no.env")
+    assert "tg-reddit-aggregator" in s.reddit_user_agent
+
+
 def test_load_secrets_rejects_non_int_api_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("TELEGRAM_API_ID", "not-a-number")
     monkeypatch.setenv("TELEGRAM_API_HASH", "abcdef")
-    monkeypatch.setenv("REDDIT_CLIENT_ID", "rcid")
-    monkeypatch.setenv("REDDIT_CLIENT_SECRET", "rcsec")
-    monkeypatch.setenv("REDDIT_USER_AGENT", "ua")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     with pytest.raises(ValueError, match="must be an integer"):
         load_secrets(tmp_path / "no.env")

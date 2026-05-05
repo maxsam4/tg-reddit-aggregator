@@ -62,13 +62,14 @@ class AppConfig(BaseModel):
 
 
 class Secrets(BaseModel):
-    """Credentials loaded from .env."""
+    """Credentials loaded from .env. Reddit access is unauthenticated; the only
+    Reddit-related setting is a custom User-Agent header (REDDIT_USER_AGENT) — it
+    has a sensible default if unset, but Reddit blocks generic UAs so set it to
+    something identifiable for production."""
 
     telegram_api_id: int
     telegram_api_hash: str
     telegram_session_path: str = "./data/userbot.session"
-    reddit_client_id: str
-    reddit_client_secret: str
     reddit_user_agent: str
     anthropic_api_key: str
 
@@ -103,14 +104,16 @@ def load_secrets(env_path: str | Path = ".env") -> Secrets:
     except ValueError as e:
         raise ValueError("TELEGRAM_API_ID must be an integer") from e
 
+    # REDDIT_USER_AGENT is recommended but not strictly required: Reddit will accept
+    # a fallback descriptive UA, just less politely.
+    from .reddit import DEFAULT_USER_AGENT
+
     return Secrets(
         telegram_api_id=api_id,
         telegram_api_hash=required("TELEGRAM_API_HASH"),
         telegram_session_path=os.environ.get(
             "TELEGRAM_SESSION_PATH", "./data/userbot.session"
         ),
-        reddit_client_id=required("REDDIT_CLIENT_ID"),
-        reddit_client_secret=required("REDDIT_CLIENT_SECRET"),
-        reddit_user_agent=required("REDDIT_USER_AGENT"),
+        reddit_user_agent=os.environ.get("REDDIT_USER_AGENT") or DEFAULT_USER_AGENT,
         anthropic_api_key=required("ANTHROPIC_API_KEY"),
     )

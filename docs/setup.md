@@ -31,22 +31,17 @@ TELEGRAM_API_HASH=abcdef0123456789...
 
 > Treat these like a password. Anyone with both can impersonate your account.
 
-## 3. Create a Reddit "script" app
+## 3. Reddit (no auth required)
 
-1. Open <https://www.reddit.com/prefs/apps>.
-2. Scroll to **create another app...** at the bottom.
-3. Pick type **script**.
-4. Set redirect URI to `http://localhost:8080` (unused but required).
-5. Submit. The page now shows the **client_id** (under your app name) and a **secret**.
-6. Copy them into `.env`:
+The aggregator hits Reddit's public JSON endpoint directly with a custom User-Agent — no script app, OAuth, or username/password is needed. The only knob is the User-Agent string. Reddit blocks generic UAs (e.g. `python-requests/x.x`), so set `REDDIT_USER_AGENT` to something identifiable:
 
 ```
-REDDIT_CLIENT_ID=abc123xyz
-REDDIT_CLIENT_SECRET=...
-REDDIT_USER_AGENT=tg-reddit-aggregator/0.1 by u/your-reddit-username
+REDDIT_USER_AGENT=tg-reddit-aggregator/0.1 (by u/your-reddit-username)
 ```
 
-> The user agent must include your Reddit username — Reddit blocks generic UAs.
+If you skip the variable a sensible project default is used, but you'll get more polite treatment from Reddit if you set it.
+
+Trade-off: unauthenticated access is rate-limited at ~10 requests/minute per IP. With one subreddit polled every 60 seconds (the default) you're at 1 req/min, well within bounds. If you scale to more than ~8 subreddits at the same poll interval, lengthen `poll_interval_seconds` in `config.yaml` to stay under the cap.
 
 ## 4. Get an Anthropic API key
 
